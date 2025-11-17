@@ -1,8 +1,10 @@
+# main.py
 import time
 import cv2
 
 from emotion_classifier import EmotionDetector
 from songs_recommender import EmotionRecommender
+from playlist_features_matcher import load_feature_dataset, build_enriched_tracks_from_playlist
 
 
 def choose_playlist(rec: EmotionRecommender):
@@ -10,19 +12,19 @@ def choose_playlist(rec: EmotionRecommender):
     CLI helper:
     - list user's playlists
     - let them pick one
-    - build model from that playlist
+    - RETURN playlist_id (we'll build the model separately)
     """
     try:
         playlists = rec.sp.current_user_playlists(limit=20)
     except Exception as e:
         print("[Playlist fetch error]", e)
         print("Will use generic (non-personal) recommendations.")
-        return
+        return None
 
     items = playlists.get("items", [])
     if not items:
         print("No playlists found. Using generic recommendations.")
-        return
+        return None
 
     print("\nYour playlists:")
     for i, pl in enumerate(items):
@@ -33,20 +35,20 @@ def choose_playlist(rec: EmotionRecommender):
     choice = input("Select playlist index to use for personalization (or press Enter to skip): ")
     if not choice.strip():
         print("Skipping personalization (fallback only).")
-        return
+        return None
 
     try:
         idx = int(choice)
         if idx < 0 or idx >= len(items):
             print("Invalid index. Skipping personalization.")
-            return
+            return None
     except ValueError:
         print("Invalid input. Skipping personalization.")
-        return
+        return None
 
     playlist_id = items[idx]["id"]
-    print(f"Building model from playlist: {items[idx]['name']!r}...")
-    rec.load_playlist(playlist_id)
+    print(f"Using playlist: {items[idx]['name']!r} for personalization...")
+    return playlist_id
 
 
 def main():
@@ -59,19 +61,42 @@ def main():
     )
     recommender = EmotionRecommender()
 
-    # optional personalization (build from chosen playlist)
-    choose_playlist(recommender)
+    # ---- 1.1) load feature dataset ----
+    csv_path = "data/spotify_data clean.csv"
+    try:
+        feature_df, id_index, name_index = load_feature_dataset(csv_path)
+        print(f"[Main] Feature dataset loaded from {csv_path}")
+    except Exception as e:
+        print(f"[Main] Could not load feature dataset ({e}).")
+        feature_df = id_index = name_index = None
+
+    # ---- 1.2) optional personalization (choose playlist + match features + build model) ----
+    playlist_id = None
+    if feature_df is not None:
+        playlist_id = choose_playlist(recommender)
+        if playlist_id:
+            enriched_tracks = build_enriched_tracks_from_playlist(
+                recommender.sp,
+                playlist_id,
+                feature_df,
+                id_index,
+                name_index,
+            )
+            recommender.build_model_from_enriched(enriched_tracks)
+        else:
+            print("[Main] No playlist selected; using fallback recommendations only.")
+    else:
+        print("[Main] No feature dataset; using fallback recommendations only.")
 
     # ---- 2) open webcam ----
     cap = cv2.VideoCapture(1, cv2.CAP_AVFOUNDATION)  # Mac
     # cap = cv2.VideoCapture(0)  # Windows / Linux
 
+    time.sleep(3)
+
     if not cap.isOpened():
         print("Error: Cannot open webcam")
         return
-
-    print("Webcam ready. Waiting 3 seconds to stabilize…")
-    time.sleep(3)
 
     print("Press 'q' to quit...")
 
@@ -81,11 +106,6 @@ def main():
     SAME_EMO_INTERVAL = 210  # 3 minutes 30 seconds
 
     current_tracks = []
-
-    # emotion stabilization for recommendation logic
-    logic_emotion = None          # emotion used for logic/recommendation
-    logic_emotion_age = 0         # how many consecutive frames we've seen this emotion
-    LOGIC_WARMUP_FRAMES = 5       # require N frames before using emotion for recs
 
     while True:
         ret, frame = cap.read()
@@ -97,24 +117,16 @@ def main():
         frame = cv2.flip(frame, 1)
 
         # ---- 3) run emotion detection ----
-        # emotion = "visual" label (shown immediately)
         emotion, box = detector.process_frame(frame)
 
-        # ---- update logic_emotion (used for decisions) ----
-        if emotion == logic_emotion:
-            logic_emotion_age += 1
-        else:
-            logic_emotion = emotion
-            logic_emotion_age = 0  # reset age when emotion changes
-
-        # ---- 4) draw face box + emotion (always use the immediate emotion) ----
+        # ---- 4) draw face box + emotion ----
         if box is not None:
             x1, y1, x2, y2 = box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.rectangle(frame, (x1, y1 - 25), (x1 + 180, y1), (0, 255, 0), -1)
             cv2.putText(
                 frame,
-                f"{emotion}",  # label updates as soon as detector changes
+                f"{emotion}",
                 (x1 + 5, y1 - 7),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -146,32 +158,29 @@ def main():
                 2,
             )
 
-        # ---- 5) trigger recommendation based on STABILIZED emotion + timing rule ----
+        # ---- 6) display FIRST ----
+        cv2.imshow("Emotion-Based Song Recommender", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+
+        # ---- 5) AFTER display: trigger recommendation based on emotion + timing rule ----
         t_now = time.time()
-
-        # logic_emotion must be valid AND stable for a few frames
-        valid_emotion = (
-            logic_emotion not in ("...", "unknown", None)
-            and logic_emotion_age >= LOGIC_WARMUP_FRAMES
-        )
-
+        valid_emotion = emotion not in ("...", "unknown", None)
         should_recommend = False
 
         if valid_emotion:
             if last_reco_emotion is None:
-                # first time we get a stable valid emotion
                 should_recommend = True
-            elif logic_emotion != last_reco_emotion:
-                # stable emotion changed -> recommend
+            elif emotion != last_reco_emotion:
                 should_recommend = True
             elif (t_now - last_reco_time) >= SAME_EMO_INTERVAL:
-                # same emotion, but enough time has passed
                 should_recommend = True
 
         if should_recommend:
-            print(f"\n=== Recommendations for emotion: {logic_emotion} ===")
+            print(f"\n=== Recommendations for emotion: {emotion} ===")
             current_tracks = recommender.get_recommendations(
-                emotion=logic_emotion,
+                emotion=emotion,
                 k=2,
                 use_personal=True,
             )
@@ -195,14 +204,8 @@ def main():
                 except Exception as e:
                     print("[Queue error]", e)
 
-            last_reco_emotion = logic_emotion
+            last_reco_emotion = emotion
             last_reco_time = t_now
-
-        # ---- 6) display ----
-        cv2.imshow("Emotion-Based Song Recommender", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
 
     cap.release()
     cv2.destroyAllWindows()

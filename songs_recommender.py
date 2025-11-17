@@ -1,4 +1,3 @@
-# songs_recommender.py
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -29,19 +28,15 @@ EMO_MAP: Dict[str, Dict] = {
 
 EMOTIONS = list(EMO_MAP.keys())
 
+# 👇 feature columns from your CSV we use for modeling
 FEATURE_KEYS = [
-    "danceability",
-    "energy",
-    "valence",
-    "tempo",
-    "acousticness",
-    "instrumentalness",
-    "liveness",
-    "speechiness",
+    "track_popularity",
+    "artist_popularity",
+    "artist_followers",
+    "album_total_tracks",
+    "track_duration_min",
 ]
 
-
-# ---------- Spotify clients ----------
 
 def _get_spotify_client() -> spotipy.Spotify:
     """
@@ -86,74 +81,59 @@ def _get_spotify_client() -> spotipy.Spotify:
     )
 
 
-def _get_spotify_app_client() -> Optional[spotipy.Spotify]:
-    """
-    Client-credentials client for endpoints that don't need user scopes
-    (e.g., audio_features). This avoids weird 403s for some user tokens.
-    """
-    client_id = os.getenv("SPOTIPY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
-
-    if not (client_id and client_secret):
-        return None
-
-    return spotipy.Spotify(
-        auth_manager=SpotifyClientCredentials(
-            client_id=client_id,
-            client_secret=client_secret,
-        )
-    )
-
-
-# ---------- Recommender ----------
-
 class EmotionRecommender:
-    def __init__(self) -> None:
-        # user client (playlists, library, queue, search, etc.)
-        self.sp = _get_spotify_client()
-        # app client (audio_features)
-        self.sp_app = _get_spotify_app_client()
+    """
+    Pure recommendation + Spotify control.
+    - Expects enriched tracks with 'features' already computed (e.g., from CSV).
+    """
 
-        self.tracks: List[Dict] = []
+    def __init__(self) -> None:
+        self.sp = _get_spotify_client()
+
+        self.tracks: List[Dict] = []  # enriched tracks with 'features'
         self.X: Optional[np.ndarray] = None
         self.scaler: Optional[StandardScaler] = None
         self.kmeans: Optional[KMeans] = None
         self.cluster_to_emotion: Dict[int, str] = {}
 
+    # ---------- model building ----------
+
+    def build_model_from_enriched(self, enriched_tracks: List[Dict]) -> None:
+        """
+        Take a list of tracks, each with a 'features' dict for FEATURE_KEYS,
+        and build the internal model (X, scaler, kmeans, etc.).
+        """
+        if not enriched_tracks:
+            print("[Recommender] No enriched tracks provided; personalization disabled.")
+            self.tracks, self.X, self.scaler, self.kmeans, self.cluster_to_emotion = (
+                [],
+                None,
+                None,
+                None,
+                {},
+            )
+            return
+
+        self.tracks = enriched_tracks
+        Xs, scaler, _ = self._build_feature_matrix(enriched_tracks)
+        self.X = Xs
+        self.scaler = scaler
+
+        if Xs.shape[0] >= len(EMOTIONS):
+            km = KMeans(n_clusters=len(EMOTIONS), random_state=42, n_init="auto")
+            km.fit(Xs)
+            self.kmeans = km
+            self.cluster_to_emotion = self._map_clusters_to_emotions(km, scaler)
+            print(f"[Recommender] Model built with {len(self.tracks)} tracks; KMeans ready.")
+        else:
+            self.kmeans = None
+            self.cluster_to_emotion = {}
+            print(
+                f"[Recommender] {len(self.tracks)} tracks available, "
+                "but not enough for clustering. Using similarity-only personalization."
+            )
+
     # ---------- public API ----------
-
-    def build_from_library(self, limit_tracks: int = 400) -> None:
-        tracks = self._fetch_user_library(limit_tracks)
-        self._build_model_from_tracks(tracks)
-        print(f"[Library model] {len(self.tracks)} usable tracks.")
-
-    def load_playlist(self, playlist_id: str) -> None:
-        raw_tracks: List[Dict] = []
-        seen = set()
-        offset = 0
-
-        while True:
-            page = self.sp.playlist_items(playlist_id, limit=50, offset=offset)
-            items = page.get("items", [])
-            if not items:
-                break
-
-            for it in items:
-                tr = it.get("track")
-                if not tr:
-                    continue
-                tid = tr.get("id")
-                if not tid:
-                    continue
-                if tid in seen:
-                    continue
-                seen.add(tid)
-                raw_tracks.append(tr)
-
-            offset += 50
-
-        self._build_model_from_tracks(raw_tracks)
-        print(f"[Playlist model] {len(self.tracks)} usable tracks.")
 
     def get_recommendations(
         self,
@@ -169,141 +149,6 @@ class EmotionRecommender:
                 return tracks
 
         return self._fallback_spotify_recs(emo, top_k=k)
-
-    # ---------- building model ----------
-
-    def _build_model_from_tracks(self, raw_tracks: List[Dict]) -> None:
-        if not raw_tracks:
-            self.tracks, self.X, self.scaler, self.kmeans, self.cluster_to_emotion = (
-                [],
-                None,
-                None,
-                None,
-                {},
-            )
-            return
-
-        ids = [t["id"] for t in raw_tracks if t.get("id")]
-        feats = self._fetch_audio_features(ids)
-
-        enriched = []
-        for t in raw_tracks:
-            tid = t.get("id")
-            if tid in feats:
-                enriched.append(
-                    {
-                        "id": tid,
-                        "name": t["name"],
-                        "artists": t.get("artists", []),
-                        "external_urls": t.get("external_urls", {}),
-                        "uri": t.get("uri"),
-                        "features": feats[tid],
-                    }
-                )
-
-        self.tracks = enriched
-        Xs, scaler, _ = self._build_feature_matrix(enriched)
-        self.X = Xs
-        self.scaler = scaler
-
-        if Xs.shape[0] >= len(EMOTIONS):
-            km = KMeans(n_clusters=len(EMOTIONS), random_state=42, n_init="auto")
-            km.fit(Xs)
-            self.kmeans = km
-            self.cluster_to_emotion = self._map_clusters_to_emotions(km, scaler)
-        else:
-            self.kmeans = None
-            self.cluster_to_emotion = {}
-
-    def _fetch_user_library(self, limit_tracks: int) -> List[Dict]:
-        out: List[Dict] = []
-        seen = set()
-
-        # saved tracks
-        try:
-            offset = 0
-            while offset < limit_tracks:
-                page = self.sp.current_user_saved_tracks(limit=50, offset=offset)
-                items = page.get("items", [])
-                if not items:
-                    break
-                for it in items:
-                    tr = it["track"]
-                    if tr and tr.get("id") and tr["id"] not in seen:
-                        out.append(tr)
-                        seen.add(tr["id"])
-                offset += 50
-        except Exception:
-            pass
-
-        # a few playlists
-        try:
-            pls = self.sp.current_user_playlists(limit=5).get("items", [])
-            for pl in pls:
-                pl_id = pl["id"]
-                offset = 0
-                fetched = 0
-                while offset < 200:
-                    page = self.sp.playlist_items(pl_id, limit=50, offset=offset)
-                    items = page.get("items", [])
-                    if not items:
-                        break
-                    for it in items:
-                        tr = it.get("track")
-                        if not tr or not tr.get("id"):
-                            continue
-                        if tr["id"] not in seen:
-                            out.append(tr)
-                            seen.add(tr["id"])
-                            fetched += 1
-                    if fetched >= 200:
-                        break
-                    offset += 50
-        except Exception:
-            pass
-
-        return out
-
-    def _fetch_audio_features(self, track_ids: List[str]) -> Dict[str, Dict]:
-        feats: Dict[str, Dict] = {}
-        BATCH = 20  # smaller + slower on purpose
-
-        printed_forbidden = False  # avoid spam
-
-        # Prefer app client (client credentials); fall back to user client
-        client = self.sp_app or self.sp
-
-        for i in range(0, len(track_ids), BATCH):
-            batch = track_ids[i: i + BATCH]
-            try:
-                af = client.audio_features(batch)
-                for tid, f in zip(batch, af):
-                    if f:
-                        feats[tid] = f
-                time.sleep(0.15)  # tiny pause between batches
-            except SpotifyException as e:
-                # 401 / 403 typically won't recover for further batches
-                if e.http_status in (401, 403):
-                    if not printed_forbidden:
-                        print(
-                            f"[audio_features WARNING] HTTP {e.http_status} "
-                            "for this token / some tracks. "
-                            "Skipping remaining features (fallback will still work)."
-                        )
-                        printed_forbidden = True
-                    break
-                else:
-                    if not printed_forbidden:
-                        print("[audio_features WARNING] SpotifyException:", e.http_status)
-                        printed_forbidden = True
-                    continue
-            except Exception as ex:
-                if not printed_forbidden:
-                    print("[audio_features WARNING] non-Spotify error, some tracks skipped.", ex)
-                    printed_forbidden = True
-                continue
-
-        return feats
 
     # ---------- feature matrix / targets / scoring ----------
 
@@ -329,17 +174,25 @@ class EmotionRecommender:
         return Xs, scaler, valid_idx
 
     def _emotion_target_vector(self, emotion: str) -> np.ndarray:
+        """
+        Map emotion into the same feature space as FEATURE_KEYS.
+        This is heuristic because these are meta-features, not pure audio mood features.
+        You can tune these mappings if needed.
+        """
         cfg = EMO_MAP.get(emotion, EMO_MAP["neutral"])
+
         base = {
-            "danceability": 0.5,
-            "energy": cfg["target_energy"],
-            "valence": cfg["target_valence"],
-            "tempo": float(cfg["target_tempo"]),
-            "acousticness": 0.5,
-            "instrumentalness": 0.0,
-            "liveness": 0.2,
-            "speechiness": 0.1,
+            # more positive mood -> more popular
+            "track_popularity": cfg["target_valence"] * 100.0,
+            "artist_popularity": cfg["target_valence"] * 100.0,
+            # more energetic -> more followers (rough heuristic)
+            "artist_followers": cfg["target_energy"] * 1e6,
+            # neutral album size
+            "album_total_tracks": 10.0,
+            # sadder -> slightly longer
+            "track_duration_min": 3.0 + (1.0 - cfg["target_energy"]),
         }
+
         return np.array([base[k] for k in FEATURE_KEYS], dtype=np.float32).reshape(
             1, -1
         )
@@ -462,7 +315,6 @@ class EmotionRecommender:
                 queued += 1
                 time.sleep(0.1)
             except SpotifyException as e:
-                # Common: no active device or insufficient scope
                 if e.http_status == 404 and "NO_ACTIVE_DEVICE" in str(e):
                     print(
                         "[queue WARNING] No active Spotify device found.\n"
