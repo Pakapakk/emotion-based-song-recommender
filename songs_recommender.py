@@ -1,3 +1,4 @@
+# songs_recommender.py
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -5,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth, SpotifyClientCredentials
-from spotipy.exceptions import SpotifyException   # <-- NEW
+from spotipy.exceptions import SpotifyException
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
@@ -25,6 +26,7 @@ EMO_MAP: Dict[str, Dict] = {
     "disgust":   {"target_valence": 0.1, "target_energy": 0.7, "target_tempo": 130},
     "fear":      {"target_valence": 0.2, "target_energy": 0.5, "target_tempo": 85},
 }
+
 EMOTIONS = list(EMO_MAP.keys())
 
 FEATURE_KEYS = [
@@ -39,7 +41,12 @@ FEATURE_KEYS = [
 ]
 
 
+# ---------- Spotify clients ----------
+
 def _get_spotify_client() -> spotipy.Spotify:
+    """
+    User-authenticated client (playlists, library, queue, search, etc.).
+    """
     client_id = os.getenv("SPOTIPY_CLIENT_ID")
     client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
     redirect_uri = os.getenv("SPOTIPY_REDIRECT_URI")
@@ -54,7 +61,7 @@ def _get_spotify_client() -> spotipy.Spotify:
             "user-read-playback-state",
         ]
         return spotipy.Spotify(
-            auth_manager = SpotifyOAuth(
+            auth_manager=SpotifyOAuth(
                 client_id=client_id,
                 client_secret=client_secret,
                 redirect_uri=redirect_uri,
@@ -64,6 +71,7 @@ def _get_spotify_client() -> spotipy.Spotify:
         )
 
     if client_id and client_secret:
+        # fallback: app-only, no user features
         return spotipy.Spotify(
             auth_manager=SpotifyClientCredentials(
                 client_id=client_id,
@@ -78,9 +86,33 @@ def _get_spotify_client() -> spotipy.Spotify:
     )
 
 
+def _get_spotify_app_client() -> Optional[spotipy.Spotify]:
+    """
+    Client-credentials client for endpoints that don't need user scopes
+    (e.g., audio_features). This avoids weird 403s for some user tokens.
+    """
+    client_id = os.getenv("SPOTIPY_CLIENT_ID")
+    client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
+
+    if not (client_id and client_secret):
+        return None
+
+    return spotipy.Spotify(
+        auth_manager=SpotifyClientCredentials(
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    )
+
+
+# ---------- Recommender ----------
+
 class EmotionRecommender:
     def __init__(self) -> None:
+        # user client (playlists, library, queue, search, etc.)
         self.sp = _get_spotify_client()
+        # app client (audio_features)
+        self.sp_app = _get_spotify_app_client()
 
         self.tracks: List[Dict] = []
         self.X: Optional[np.ndarray] = None
@@ -187,6 +219,7 @@ class EmotionRecommender:
         out: List[Dict] = []
         seen = set()
 
+        # saved tracks
         try:
             offset = 0
             while offset < limit_tracks:
@@ -203,6 +236,7 @@ class EmotionRecommender:
         except Exception:
             pass
 
+        # a few playlists
         try:
             pls = self.sp.current_user_playlists(limit=5).get("items", [])
             for pl in pls:
@@ -236,10 +270,13 @@ class EmotionRecommender:
 
         printed_forbidden = False  # avoid spam
 
+        # Prefer app client (client credentials); fall back to user client
+        client = self.sp_app or self.sp
+
         for i in range(0, len(track_ids), BATCH):
-            batch = track_ids[i : i + BATCH]
+            batch = track_ids[i: i + BATCH]
             try:
-                af = self.sp.audio_features(batch)
+                af = client.audio_features(batch)
                 for tid, f in zip(batch, af):
                     if f:
                         feats[tid] = f
@@ -260,9 +297,9 @@ class EmotionRecommender:
                         print("[audio_features WARNING] SpotifyException:", e.http_status)
                         printed_forbidden = True
                     continue
-            except Exception:
+            except Exception as ex:
                 if not printed_forbidden:
-                    print("[audio_features WARNING] non-Spotify error, some tracks skipped.")
+                    print("[audio_features WARNING] non-Spotify error, some tracks skipped.", ex)
                     printed_forbidden = True
                 continue
 
@@ -399,12 +436,17 @@ class EmotionRecommender:
 
         return tracks
 
-    def queue_tracks(self, tracks: List[Dict]) -> None:
+    # ---------- queue control ----------
+
+    def queue_tracks(self, tracks: List[Dict]) -> int:
         """
         Queue the given tracks on the user's currently active Spotify device.
+        Returns the number of tracks successfully queued.
         """
         if not tracks:
-            return
+            return 0
+
+        queued = 0
 
         for tr in tracks:
             uri = tr.get("uri")
@@ -417,11 +459,21 @@ class EmotionRecommender:
 
             try:
                 self.sp.add_to_queue(uri=uri)
+                queued += 1
                 time.sleep(0.1)
             except SpotifyException as e:
-                # 403/404 often mean no active device or insufficient scope
+                # Common: no active device or insufficient scope
+                if e.http_status == 404 and "NO_ACTIVE_DEVICE" in str(e):
+                    print(
+                        "[queue WARNING] No active Spotify device found.\n"
+                        "Open Spotify on your phone/PC, start playing a song,\n"
+                        "then trigger a new recommendation."
+                    )
+                    break
                 print(f"[queue WARNING] HTTP {e.http_status} while queueing {uri}: {e}")
                 break
             except Exception as e:
                 print(f"[queue WARNING] non-Spotify error for {uri}: {e}")
                 break
+
+        return queued
