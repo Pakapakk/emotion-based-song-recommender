@@ -68,11 +68,21 @@ python3 main.py
 
 ---
 
-## 🏗 System Flow
+### ✅ Short Process Flow (Start → End)
 
-Webcam → YOLO Face Detect → FER+ Emotion Classify → Aggregate Scene Emotion
-- Stabilize (0.65s) → Check Spotify Playback
-- Recommendation Logic:
-  - emotion changed → recommend now 
-  - same emotion → recommend when ≤20s left
-- Mixed Personalized + Global Recs → Queue in Spotify
+1. Load dataset (spotifydata.csv) and build indexes. 
+2. User selects a playlist from Spotify. 
+3. Fetch playlist tracks and match them to the dataset. 
+4. Build enriched tracks with feature vectors. 
+5. Train personalization model:
+   - Standardize features 
+   - Optional KMeans clustering (map clusters → emotions)
+6. Start webcam and detect faces with YOLO. 
+7. Classify emotions with FER+, aggregate multiple faces. 
+8. Stabilize emotion (≥0.65s). 
+9. Monitor Spotify playback (track, progress, seconds left). 
+10. Trigger recommendations:
+    - Emotion changed → immediate 
+    - Same emotion + song ending → smooth transition 
+11. Generate song list (personalized + fallback) and queue tracks. 
+12. Display results via OpenCV UI.
