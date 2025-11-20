@@ -1,6 +1,6 @@
-# main.py
 import time
 import cv2
+from collections import Counter
 
 from emotion_classifier import EmotionDetector
 from songs_recommender import EmotionRecommender
@@ -9,7 +9,6 @@ from playlist_features_matcher import load_feature_dataset, build_enriched_track
 
 def choose_playlist(rec: EmotionRecommender):
     """
-    CLI helper:
     - list user's playlists
     - let them pick one
     - RETURN playlist_id (we'll build the model separately)
@@ -52,7 +51,7 @@ def choose_playlist(rec: EmotionRecommender):
 
 
 def main():
-    # ---- 1) init modules ----
+    # ---- init modules ----
     detector = EmotionDetector(
         det_weights="models/yolov12n-face.pt",
         emotion_onnx="models/emotion-ferplus-8.onnx",
@@ -61,8 +60,8 @@ def main():
     )
     recommender = EmotionRecommender()
 
-    # ---- 1.1) load feature dataset ----
-    csv_path = "data/spotify_data clean.csv"
+    # ---- load feature dataset ----
+    csv_path = "data/spotifydata.csv"
     try:
         feature_df, id_index, name_index = load_feature_dataset(csv_path)
         print(f"[Main] Feature dataset loaded from {csv_path}")
@@ -70,8 +69,7 @@ def main():
         print(f"[Main] Could not load feature dataset ({e}).")
         feature_df = id_index = name_index = None
 
-    # ---- 1.2) optional personalization (choose playlist + match features + build model) ----
-    playlist_id = None
+    # ---- personalization ----
     if feature_df is not None:
         playlist_id = choose_playlist(recommender)
         if playlist_id:
@@ -88,24 +86,41 @@ def main():
     else:
         print("[Main] No feature dataset; using fallback recommendations only.")
 
-    # ---- 2) open webcam ----
+    # ---- open webcam ----
     cap = cv2.VideoCapture(1, cv2.CAP_AVFOUNDATION)  # Mac
     # cap = cv2.VideoCapture(0)  # Windows / Linux
 
     time.sleep(3)
-
     if not cap.isOpened():
         print("Error: Cannot open webcam")
         return
 
     print("Press 'q' to quit...")
 
-    # tracking for recommendation timing
-    last_reco_emotion = None
-    last_reco_time = 0.0
-    SAME_EMO_INTERVAL = 210  # 3 minutes 30 seconds
+    # ---- emotion / stability state ----
+    last_scene_emotion = "..."
+    stable_emotion = "..."
+    candidate_emotion = None
+    stable_since = None
+    STABLE_SECONDS = 0.65    # stable emotion for {STABLE_SECONDS} sec
 
+    '''
+    Microexpressions: 
+    These are involuntary, very brief facial muscle movements that 
+    reveal a person's true emotion, often when they are trying to conceal it.
+    They typically last between 0.04 and 0.5 seconds (40 to 500 milliseconds).
+    '''
+
+    # ---- recommendation state ----
+    last_reco_emotion = None
     current_tracks = []
+
+    # ---- Spotify playback state ----
+    playback_check_interval = 1.0
+    last_playback_check = 0.0
+    current_track_id = None
+    seconds_to_end = None
+    last_queued_for_track_id = None
 
     while True:
         ret, frame = cap.read()
@@ -113,20 +128,23 @@ def main():
             print("Error: Frame not received")
             break
 
-        # mirror for more natural interaction
         frame = cv2.flip(frame, 1)
 
-        # ---- 3) run emotion detection ----
-        emotion, box = detector.process_frame(frame)
+        # detect multiple faces + emotions
+        emo_boxes = detector.process_frame_multi(frame)
 
-        # ---- 4) draw face box + emotion ----
-        if box is not None:
+        valid_face_emotions = []
+        for emo, box in emo_boxes:
+            if box is None:
+                continue
             x1, y1, x2, y2 = box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.rectangle(frame, (x1, y1 - 25), (x1 + 180, y1), (0, 255, 0), -1)
+
+            label = emo if emo not in ("...", "unknown", None) else "detecting..."
+            cv2.rectangle(frame, (x1, y1 - 25), (x1 + 200, y1), (0, 255, 0), -1)
             cv2.putText(
                 frame,
-                f"{emotion}",
+                label,
                 (x1 + 5, y1 - 7),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -135,6 +153,83 @@ def main():
                 cv2.LINE_AA,
             )
 
+            if emo not in ("...", "unknown", None):
+                valid_face_emotions.append(emo)
+
+        # aggregate scene emotion with tie-breaking
+        if valid_face_emotions:
+            counts = Counter(valid_face_emotions)
+            max_count = max(counts.values())
+            candidates = [e for e, c in counts.items() if c == max_count]
+
+            if len(candidates) == 1:
+                agg_emotion = candidates[0]
+            else:
+                if last_scene_emotion in candidates:
+                    agg_emotion = last_scene_emotion
+                elif "neutral" in candidates:
+                    agg_emotion = "neutral"
+                else:
+                    agg_emotion = sorted(candidates)[0]
+        else:
+            agg_emotion = "..."
+
+        last_scene_emotion = agg_emotion
+
+        # stable emotion
+        t_now = time.time()
+        if agg_emotion not in ("...", "unknown", None):
+            if agg_emotion != candidate_emotion:
+                candidate_emotion = agg_emotion
+                stable_since = t_now
+            else:
+                if stable_since is not None and (t_now - stable_since) >= STABLE_SECONDS:
+                    stable_emotion = agg_emotion
+        else:
+            candidate_emotion = None
+            stable_since = None
+
+        # poll Spotify playback every 1s
+        if (t_now - last_playback_check) >= playback_check_interval:
+            last_playback_check = t_now
+            try:
+                playback = recommender.sp.current_playback()
+            except Exception as e:
+                print("[Playback error]", e)
+                playback = None
+
+            if playback and playback.get("is_playing"):
+                item = playback.get("item") or {}
+                current_track_id = item.get("id")
+                duration_ms = item.get("duration_ms") or 0
+                progress_ms = playback.get("progress_ms") or 0
+                if duration_ms > 0:
+                    seconds_to_end = max(0.0, (duration_ms - progress_ms) / 1000.0)
+                else:
+                    seconds_to_end = None
+            else:
+                current_track_id = None
+                seconds_to_end = None
+
+        # HUD
+        cv2.putText(
+            frame,
+            f"Scene: {agg_emotion}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"Stable: {stable_emotion}",
+            (10, 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
         cv2.putText(
             frame,
             "Press 'q' to quit",
@@ -145,7 +240,6 @@ def main():
             2,
         )
 
-        # show first recommended track (if any) at bottom
         if current_tracks:
             now_playing = f"{current_tracks[0]['title']} - {current_tracks[0]['artists']}"
             cv2.putText(
@@ -158,54 +252,64 @@ def main():
                 2,
             )
 
-        # ---- 6) display FIRST ----
         cv2.imshow("Emotion-Based Song Recommender", frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
 
-        # ---- 5) AFTER display: trigger recommendation based on emotion + timing rule ----
-        t_now = time.time()
-        valid_emotion = emotion not in ("...", "unknown", None)
-        should_recommend = False
+        # recommendation logic:
+        #   - if stable emotion changed -> recommend immediately
+        #   - if same emotion -> recommend when song is within 20s of ending
 
-        if valid_emotion:
-            if last_reco_emotion is None:
-                should_recommend = True
-            elif emotion != last_reco_emotion:
-                should_recommend = True
-            elif (t_now - last_reco_time) >= SAME_EMO_INTERVAL:
-                should_recommend = True
-
-        if should_recommend:
-            print(f"\n=== Recommendations for emotion: {emotion} ===")
+        def do_recommend_and_queue(reason: str):
+            nonlocal current_tracks, last_reco_emotion, last_queued_for_track_id
+            print(f"\n=== Recommendations for emotion (stable): {stable_emotion} | reason: {reason} ===")
             current_tracks = recommender.get_recommendations(
-                emotion=emotion,
-                k=2,
+                emotion=stable_emotion,
+                k=1,
                 use_personal=True,
             )
-
             if not current_tracks:
                 print("No tracks returned.")
-            else:
-                for i, tr in enumerate(current_tracks, start=1):
-                    print(f"{i}. {tr['title']} — {tr['artists']}")
-                    print(f"   {tr['url']}")
+                return
 
-                try:
-                    queued = recommender.queue_tracks(current_tracks)
-                    if queued > 0:
-                        print(f"Queued {queued} track(s) to your active Spotify device.")
-                    else:
-                        print(
-                            "Tracks were NOT queued. "
-                            "Make sure you have an active Spotify device (Spotify app open & playing)."
-                        )
-                except Exception as e:
-                    print("[Queue error]", e)
+            for i, tr in enumerate(current_tracks, start=1):
+                print(f"{i}. {tr['title']} — {tr['artists']}")
+                print(f"   {tr['url']}")
 
-            last_reco_emotion = emotion
-            last_reco_time = t_now
+            try:
+                queued = recommender.queue_tracks(current_tracks)
+                if queued > 0:
+                    print(f"Queued {queued} track(s) to your active Spotify device.")
+                else:
+                    print(
+                        "Tracks were NOT queued. "
+                        "Make sure you have an active Spotify device "
+                        "(Spotify app open & playing)."
+                    )
+            except Exception as e:
+                print("[Queue error]", e)
+
+            last_reco_emotion = stable_emotion
+            last_queued_for_track_id = current_track_id
+
+        # invalid stable emotion -> do nothing
+        if stable_emotion in ("...", "unknown", None):
+            continue
+
+        # CASE 1: emotion changed -> recommend immediately
+        if last_reco_emotion is None or stable_emotion != last_reco_emotion:
+            do_recommend_and_queue("emotion changed")
+            continue
+
+        # CASE 2: emotion unchanged -> recommend when song is about to end (<= 20s)
+        if (
+            current_track_id is not None
+            and seconds_to_end is not None
+            and seconds_to_end <= 20.0
+            and current_track_id != last_queued_for_track_id
+        ):
+            do_recommend_and_queue("song ending soon")
 
     cap.release()
     cv2.destroyAllWindows()

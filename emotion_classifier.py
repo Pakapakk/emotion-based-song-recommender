@@ -15,12 +15,11 @@ EMOTION_DICT = {
 
 class EmotionDetector:
     """
-    Pure emotion-detection module.
+    Emotion-detection module (multi-face version).
     - You give it a frame (BGR).
-    - It returns (emotion_label, largest_face_box).
+    - It returns a list of (emotion_label, box) per face.
 
-    It runs YOLO every frame, and the FER+ classifier every N frames
-    to keep FPS higher.
+    box = (x1, y1, x2, y2)
     """
 
     def __init__(
@@ -36,8 +35,8 @@ class EmotionDetector:
         self.conf = conf
 
         self.frame_count = 0
-        self.current_emotion = "..."
-        self.last_box = None
+        # store last known emotions to reduce flicker
+        self.last_emotions = []   # list of (emotion_text, box)
 
     def _classify_face(self, face_bgr: np.ndarray) -> str:
         """Run FER+ ONNX on a cropped face and return the label."""
@@ -45,46 +44,64 @@ class EmotionDetector:
         face_64 = cv2.resize(gray_face, (64, 64))
 
         blob = face_64.astype("float32")
-        blob = np.expand_dims(blob, axis=0)  # (1, 64, 64)
-        blob = np.expand_dims(blob, axis=0)  # (1, 1, 64, 64)
+        blob = np.expand_dims(blob, axis=0)
+        blob = np.expand_dims(blob, axis=0)
 
         self.emotion_net.setInput(blob)
-        out = self.emotion_net.forward()  # (1, N)
+        out = self.emotion_net.forward()
         pred_idx = int(np.argmax(out[0]))
         return EMOTION_DICT.get(pred_idx, "unknown")
 
-    def process_frame(self, frame_bgr: np.ndarray):
+    def process_frame_multi(self, frame_bgr: np.ndarray):
         """
-        Main API.
-        :param frame_bgr: input frame (already flipped if you want mirror).
-        :return: (emotion_text, largest_box)
-                 largest_box = (x1, y1, x2, y2) or None
+        Multi-face API.
+        :param frame_bgr: input frame (BGR).
+        :return: list of (emotion_text, box)
+                 box = (x1, y1, x2, y2)
         """
         self.frame_count += 1
 
+        # ---- YOLO face detection ----
         results = self.det_model(frame_bgr, verbose=False, conf=self.conf)
 
-        largest_face = None
-        largest_box = None
-        largest_area = 0
+        faces = []
+        face_boxes = []
 
         for r in results:
             for box in r.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                area = (x2 - x1) * (y2 - y1)
-                if area > largest_area:
-                    largest_area = area
-                    largest_box = (x1, y1, x2, y2)
-                    largest_face = frame_bgr[y1:y2, x1:x2]
 
-        # Only run classifier every N frames
-        if (
-            largest_face is not None
-            and largest_face.size > 0
-            and (self.frame_count % self.classify_every == 0)
-        ):
-            self.current_emotion = self._classify_face(largest_face)
+                # clip to frame
+                h, w = frame_bgr.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
 
-        self.last_box = largest_box
-        return self.current_emotion, largest_box
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                face_crop = frame_bgr[y1:y2, x1:x2]
+                if face_crop.size == 0:
+                    continue
+
+                faces.append((face_crop, (x1, y1, x2, y2)))
+                face_boxes.append((x1, y1, x2, y2))
+
+        # ---- Classify every N frames to save FPS ----
+        emotions = []
+        if len(faces) > 0 and (self.frame_count % self.classify_every == 0):
+            for face_crop, box in faces:
+                emo = self._classify_face(face_crop)
+                emotions.append((emo, box))
+            self.last_emotions = emotions
+        else:
+            if self.last_emotions and len(self.last_emotions) == len(face_boxes):
+                emotions = [
+                    (emo, box) for (emo, _old_box), box in zip(self.last_emotions, face_boxes)
+                ]
+            else:
+                # if we don't have previous emotions, mark as "..."
+                emotions = [("...", box) for box in face_boxes]
+                self.last_emotions = emotions
+
+        return emotions

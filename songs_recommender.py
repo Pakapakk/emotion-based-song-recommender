@@ -1,6 +1,8 @@
 import os
 import time
 from typing import Dict, List, Optional, Tuple
+from collections import deque
+import random
 
 import numpy as np
 import spotipy
@@ -96,6 +98,9 @@ class EmotionRecommender:
         self.kmeans: Optional[KMeans] = None
         self.cluster_to_emotion: Dict[int, str] = {}
 
+        # NEW: remember recently recommended tracks to avoid repetition
+        self.recent_track_ids: deque[str] = deque(maxlen=50)
+
     # ---------- model building ----------
 
     def build_model_from_enriched(self, enriched_tracks: List[Dict]) -> None:
@@ -141,14 +146,62 @@ class EmotionRecommender:
         k: int = 5,
         use_personal: bool = True,
     ) -> List[Dict]:
+        """
+        Mixed strategy:
+        - Use personal model (playlist-based) if available.
+        - Also use Spotify search fallback.
+        - Combine, de-duplicate, avoid recent tracks, shuffle, then pick k.
+        """
         emo = emotion if emotion in EMO_MAP else "neutral"
 
-        if use_personal and self.X is not None and self.tracks:
-            tracks = self._personalized_recs(emo, top_k=k)
-            if tracks:
-                return tracks
+        # get more candidates than we finally need
+        base_k = max(k, 3)
+        personal_top_k = base_k * 3
+        fallback_top_k = base_k * 3
 
-        return self._fallback_spotify_recs(emo, top_k=k)
+        personal_tracks: List[Dict] = []
+        if use_personal and self.X is not None and self.tracks:
+            personal_tracks = self._personalized_recs(emo, top_k=personal_top_k)
+
+        fallback_tracks = self._fallback_spotify_recs(emo, top_k=fallback_top_k)
+
+        # merge & de-duplicate by track id
+        all_candidates: List[Dict] = []
+        seen_ids = set()
+
+        for tr_list in (personal_tracks, fallback_tracks):
+            for tr in tr_list:
+                tid = tr.get("id")
+                if not tid or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                all_candidates.append(tr)
+
+        if not all_candidates:
+            return []
+
+        # filter out recently recommended songs
+        fresh_candidates = [
+            tr for tr in all_candidates
+            if tr.get("id") not in self.recent_track_ids
+        ]
+
+        # if filtering removes too many, fall back to all_candidates
+        if len(fresh_candidates) < k:
+            fresh_candidates = all_candidates
+
+        # shuffle for variety
+        random.shuffle(fresh_candidates)
+
+        picks = fresh_candidates[:k]
+
+        # update history
+        for tr in picks:
+            tid = tr.get("id")
+            if tid:
+                self.recent_track_ids.append(tid)
+
+        return picks
 
     # ---------- feature matrix / targets / scoring ----------
 
@@ -176,20 +229,14 @@ class EmotionRecommender:
     def _emotion_target_vector(self, emotion: str) -> np.ndarray:
         """
         Map emotion into the same feature space as FEATURE_KEYS.
-        This is heuristic because these are meta-features, not pure audio mood features.
-        You can tune these mappings if needed.
         """
         cfg = EMO_MAP.get(emotion, EMO_MAP["neutral"])
 
         base = {
-            # more positive mood -> more popular
             "track_popularity": cfg["target_valence"] * 100.0,
             "artist_popularity": cfg["target_valence"] * 100.0,
-            # more energetic -> more followers (rough heuristic)
             "artist_followers": cfg["target_energy"] * 1e6,
-            # neutral album size
             "album_total_tracks": 10.0,
-            # sadder -> slightly longer
             "track_duration_min": 3.0 + (1.0 - cfg["target_energy"]),
         }
 
@@ -273,8 +320,10 @@ class EmotionRecommender:
 
         tracks: List[Dict] = []
         try:
-            results = self.sp.search(q=q, type="track", limit=max(top_k, 10))
-            for t in results.get("tracks", {}).get("items", [])[:top_k]:
+            # ask Spotify for more than we need for variety
+            limit = max(top_k, 10)
+            results = self.sp.search(q=q, type="track", limit=limit)
+            for t in results.get("tracks", {}).get("items", []):
                 tracks.append(
                     {
                         "id": t["id"],
