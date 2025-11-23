@@ -17,7 +17,7 @@ pip install -r requirements.txt
 ```.env
 SPOTIPY_CLIENT_ID=
 SPOTIPY_CLIENT_SECRET=
-SPOTIPY_REDIRECT_URI=
+SPOTIPY_REDIRECT_URI="http://127.0.0.1:8888/callback"
 ```
 
 ### First Run
