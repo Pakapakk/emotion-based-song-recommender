@@ -5,6 +5,7 @@ from collections import Counter
 from emotion_classifier import EmotionDetector
 from songs_recommender import EmotionRecommender
 from playlist_features_matcher import load_feature_dataset, build_enriched_tracks_from_playlist
+from ui_overlay import draw_face_box, draw_overlay
 
 
 def choose_playlist(rec: EmotionRecommender):
@@ -97,6 +98,21 @@ def main():
 
     print("Press 'q' to quit...")
 
+    window_name = "Emotion-Based Song Recommender"
+    cv2.namedWindow(window_name)
+    quit_clicked = [False]
+    button_rect = [None]
+
+    def handle_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            rect = button_rect[0]
+            if rect:
+                x1, y1, x2, y2 = rect
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    quit_clicked[0] = True
+
+    cv2.setMouseCallback(window_name, handle_mouse)
+
     # ---- emotion / stability state ----
     last_scene_emotion = "..."
     stable_emotion = "..."
@@ -138,20 +154,7 @@ def main():
             if box is None:
                 continue
             x1, y1, x2, y2 = box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-            label = emo if emo not in ("...", "unknown", None) else "detecting..."
-            cv2.rectangle(frame, (x1, y1 - 25), (x1 + 200, y1), (0, 255, 0), -1)
-            cv2.putText(
-                frame,
-                label,
-                (x1 + 5, y1 - 7),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 0),
-                1,
-                cv2.LINE_AA,
-            )
+            draw_face_box(frame, x1, y1, x2, y2, emo)
 
             if emo not in ("...", "unknown", None):
                 valid_face_emotions.append(emo)
@@ -182,12 +185,16 @@ def main():
             if agg_emotion != candidate_emotion:
                 candidate_emotion = agg_emotion
                 stable_since = t_now
+                # Reset stable emotion when candidate changes
+                stable_emotion = "..."
             else:
                 if stable_since is not None and (t_now - stable_since) >= STABLE_SECONDS:
                     stable_emotion = agg_emotion
         else:
             candidate_emotion = None
             stable_since = None
+            # Reset stable emotion when no valid emotion detected
+            stable_emotion = "..."
 
         # poll Spotify playback every 1s
         if (t_now - last_playback_check) >= playback_check_interval:
@@ -211,50 +218,20 @@ def main():
                 current_track_id = None
                 seconds_to_end = None
 
-        # HUD
-        cv2.putText(
-            frame,
-            f"Scene: {agg_emotion}",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"Stable: {stable_emotion}",
-            (10, 90),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            frame,
-            "Press 'q' to quit",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
 
-        if current_tracks:
-            now_playing = f"{current_tracks[0]['title']} - {current_tracks[0]['artists']}"
-            cv2.putText(
-                frame,
-                now_playing[:60],
-                (10, frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-            )
-
-        cv2.imshow("Emotion-Based Song Recommender", frame)
+        overlay_state = draw_overlay(
+            frame=frame,
+            agg_emotion=agg_emotion,
+            stable_emotion=stable_emotion,
+            current_tracks=current_tracks,
+        )
+        button_rect[0] = overlay_state.get("quit_button")
+        
+        cv2.imshow(window_name, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
+            break
+        if quit_clicked[0]:
             break
 
         # recommendation logic:
