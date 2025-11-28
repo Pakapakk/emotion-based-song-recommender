@@ -23,13 +23,14 @@ COLORS = {
     "text_muted": (150, 150, 150),
     
     "emotion_colors": {
-        "happiness": (255, 215, 0),  # Gold
-        "sadness": (70, 130, 180),  # SteelBlue
-        "anger": (220, 20, 60),  # Crimson
+        "happy": (255, 215, 0),  # Gold
+        "sad": (70, 130, 180),  # SteelBlue
+        "angry": (220, 20, 60),  # Crimson
         "surprise": (255, 165, 0),  # Orange
         "fear": (138, 43, 226),  # BlueViolet
         "disgust": (124, 252, 0),  # LawnGreen
         "neutral": (192, 192, 192),  # Silver
+        "contempt": (255, 0, 0)
     },
 }
 

@@ -20,8 +20,8 @@ load_dotenv()
 
 EMO_MAP: Dict[str, Dict] = {
     "happy":     {"target_valence": 0.9, "target_energy": 0.8, "target_tempo": 125},
-    "sad":       {"target_valence": 0.2, "target_energy": 0.2, "target_tempo": 70},
-    "angry":     {"target_valence": 0.2, "target_energy": 0.9, "target_tempo": 140},
+    "sad":       {"target_valence": 0.08, "target_energy": 0.1, "target_tempo": 65},
+    "angry":     {"target_valence": 0.35, "target_energy": 0.98, "target_tempo": 160},
     "surprise":  {"target_valence": 0.6, "target_energy": 0.6, "target_tempo": 115},
     "neutral":   {"target_valence": 0.5, "target_energy": 0.4, "target_tempo": 100},
     "disgust":   {"target_valence": 0.1, "target_energy": 0.7, "target_tempo": 130},
@@ -164,10 +164,11 @@ class EmotionRecommender:
 
         base_k = max(k, 3)
 
-        # We treat these as *pool sizes*, not final output sizes
-        pool_factor = 5  # bigger → more variety
+        pool_factor = 5
         personal_top_k = base_k * pool_factor
-        fallback_top_k = base_k * pool_factor
+
+        fallback_pool_factor = 8
+        fallback_top_k = base_k * fallback_pool_factor
 
         personal_tracks: List[Dict] = []
         if use_personal and self.X is not None and self.tracks is not None:

@@ -42,6 +42,9 @@ class EmotionDetector:
     ) -> None:
         self.det_model = YOLO(det_weights)
         self.emotion_model = YOLO(emotion_pt)
+        self.class_names = {i: name.lower() for i, name in self.emotion_model.names.items()}
+        print("Loaded emotion classes:", self.class_names)
+
         self.classify_every = max(1, int(classify_every))
         self.conf = conf
 
@@ -49,22 +52,12 @@ class EmotionDetector:
         self.last_emotions = []
 
     def _classify_face(self, face_bgr: np.ndarray) -> str:
-        """
-        Run YOLO classification model on a cropped face (BGR).
-        Returns emotion label using EMOTION_DICT.
-        """
-
         if face_bgr.ndim == 2:
             face_bgr = cv2.cvtColor(face_bgr, cv2.COLOR_GRAY2BGR)
         elif face_bgr.shape[2] == 1:
             face_bgr = cv2.cvtColor(face_bgr, cv2.COLOR_GRAY2BGR)
 
-        results = self.emotion_model(
-            face_bgr,
-            imgsz=640,
-            verbose=False,
-        )
-
+        results = self.emotion_model(face_bgr, imgsz=640, verbose=False)
         if not results:
             return "unknown"
 
@@ -74,8 +67,23 @@ class EmotionDetector:
 
         pred_idx = int(r.probs.top1)
 
-        return EMOTION_DICT.get(pred_idx, "unknown")
+        # YOLO’s built-in class names
+        raw_name = self.class_names.get(pred_idx, "unknown")
 
+        # Normalize to your EmotionRecommender emotion keys
+        RAW_TO_PIPE = {
+            "angry": "anger",
+            "contempt": "contempt",
+            "disgust": "disgust",
+            "fear": "fear",
+            "happy": "happiness",
+            "neutral": "neutral",
+            "sad": "sadness",
+            "suprise": "surprise",  # fix typo
+            "surprise": "surprise",
+        }
+
+        return RAW_TO_PIPE.get(raw_name, "unknown")
 
     def process_frame_multi(self, frame_bgr: np.ndarray):
         """
