@@ -31,13 +31,17 @@ EMO_MAP: Dict[str, Dict] = {
 
 EMOTIONS = list(EMO_MAP.keys())
 
-# 👇 feature columns from your CSV we use for modeling
 FEATURE_KEYS = [
-    "track_popularity",
-    "artist_popularity",
-    "artist_followers",
-    "album_total_tracks",
-    "track_duration_min",
+    "danceability",
+    "energy",
+    "valence",
+    "speechiness",
+    "acousticness",
+    "instrumentalness",
+    "liveness",
+    "loudness",
+    "tempo",
+    "duration_ms",
 ]
 
 
@@ -86,8 +90,9 @@ def _get_spotify_client() -> spotipy.Spotify:
 
 class EmotionRecommender:
     """
-    Pure recommendation + Spotify control.
-    - Expects enriched tracks with 'features' already computed (e.g., from CSV).
+    Recommendation + Spotify control.
+    - Expects enriched tracks with 'features' dict containing FEATURE_KEYS
+      (e.g., from your CSV with full audio features).
     """
 
     def __init__(self) -> None:
@@ -99,10 +104,7 @@ class EmotionRecommender:
         self.kmeans: Optional[KMeans] = None
         self.cluster_to_emotion: Dict[int, str] = {}
 
-        # NEW: remember recently recommended tracks to avoid repetition
         self.recent_track_ids: deque[str] = deque(maxlen=50)
-
-    # ---------- model building ----------
 
     def build_model_from_enriched(self, enriched_tracks: List[Dict]) -> None:
         """
@@ -139,8 +141,6 @@ class EmotionRecommender:
                 "but not enough for clustering. Using similarity-only personalization."
             )
 
-    # ---------- public API ----------
-
     def get_recommendations(
         self,
         emotion: str,
@@ -155,18 +155,16 @@ class EmotionRecommender:
         """
         emo = emotion if emotion in EMO_MAP else "neutral"
 
-        # get more candidates than we finally need
         base_k = max(k, 3)
         personal_top_k = base_k * 3
         fallback_top_k = base_k * 3
 
         personal_tracks: List[Dict] = []
-        if use_personal and self.X is not None and self.tracks:
+        if use_personal and self.X is not None and self.tracks is not None:
             personal_tracks = self._personalized_recs(emo, top_k=personal_top_k)
 
         fallback_tracks = self._fallback_spotify_recs(emo, top_k=fallback_top_k)
 
-        # merge & de-duplicate by track id
         all_candidates: List[Dict] = []
         seen_ids = set()
 
@@ -204,8 +202,6 @@ class EmotionRecommender:
 
         return picks
 
-    # ---------- feature matrix / targets / scoring ----------
-
     def _build_feature_matrix(
         self, tracks: List[Dict]
     ) -> Tuple[np.ndarray, StandardScaler, List[int]]:
@@ -230,24 +226,47 @@ class EmotionRecommender:
     def _emotion_target_vector(self, emotion: str) -> np.ndarray:
         """
         Map emotion into the same feature space as FEATURE_KEYS.
+
+        Uses EMO_MAP's valence/energy/tempo as anchors and fills
+        other features with interpretable heuristics.
         """
         cfg = EMO_MAP.get(emotion, EMO_MAP["neutral"])
+        valence = cfg["target_valence"]
+        energy = cfg["target_energy"]
+        tempo = cfg["target_tempo"]
+
+        danceability = (valence + energy) / 2.0
+        speechiness = 0.15 + 0.3 * energy
+        acousticness = 1.0 - energy
+        instrumentalness = 0.3 if valence > 0.4 else 0.5
+        liveness = 0.2 + 0.3 * energy
+
+        loudness = -20.0 + 20.0 * energy
+
+        duration_ms = (3.5 - 1.0 * (energy - 0.5)) * 60_000
 
         base = {
-            "track_popularity": cfg["target_valence"] * 100.0,
-            "artist_popularity": cfg["target_valence"] * 100.0,
-            "artist_followers": cfg["target_energy"] * 1e6,
-            "album_total_tracks": 10.0,
-            "track_duration_min": 3.0 + (1.0 - cfg["target_energy"]),
+            "danceability":     danceability,
+            "energy":           energy,
+            "valence":          valence,
+            "speechiness":      speechiness,
+            "acousticness":     acousticness,
+            "instrumentalness": instrumentalness,
+            "liveness":         liveness,
+            "loudness":         loudness,
+            "tempo":            float(tempo),
+            "duration_ms":      float(duration_ms),
         }
 
-        return np.array([base[k] for k in FEATURE_KEYS], dtype=np.float32).reshape(
-            1, -1
-        )
+        return np.array([base[k] for k in FEATURE_KEYS], dtype=np.float32).reshape(1, -1)
 
     def _map_clusters_to_emotions(
         self, kmeans: KMeans, scaler: StandardScaler
     ) -> Dict[int, str]:
+        """
+        Assign each KMeans cluster to the closest emotion target vector
+        using cosine similarity in the scaled feature space.
+        """
         cluster_to_emotion: Dict[int, str] = {}
         centers = kmeans.cluster_centers_
 
@@ -266,6 +285,7 @@ class EmotionRecommender:
                     best_sim = sim
                     best_emo = emo
             cluster_to_emotion[ci] = best_emo or "neutral"
+
         return cluster_to_emotion
 
     def _personalized_recs(self, emotion: str, top_k: int) -> List[Dict]:
@@ -316,6 +336,7 @@ class EmotionRecommender:
             "neutral": "lofi chill beats",
             "disgust": "industrial metal",
             "fear": "dark ambient cinematic",
+            "contempt": "indie mellow alt",
         }
         q = query_map.get(emotion, "chill pop")
 
@@ -338,8 +359,6 @@ class EmotionRecommender:
             print("[Spotify fallback search error]", e)
 
         return tracks
-
-    # ---------- queue control ----------
 
     def queue_tracks(self, tracks: List[Dict]) -> int:
         """

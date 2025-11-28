@@ -61,31 +61,28 @@ def main():
     )
     recommender = EmotionRecommender()
 
-    # ---- load feature dataset ----
     csv_path = "data/spotifydata.csv"
     try:
         feature_df, id_index, name_index = load_feature_dataset(csv_path)
-        print(f"[Main] Feature dataset loaded from {csv_path}")
+        print(f"[Main] Loaded feature dataset from {csv_path} with {len(feature_df)} tracks.")
     except Exception as e:
-        print(f"[Main] Could not load feature dataset ({e}).")
-        feature_df = id_index = name_index = None
+        print(f"[Main] Could not load feature dataset from {csv_path}: {e}")
+        feature_df, id_index, name_index = None, None, None
 
-    # ---- personalization ----
-    if feature_df is not None:
-        playlist_id = choose_playlist(recommender)
-        if playlist_id:
-            enriched_tracks = build_enriched_tracks_from_playlist(
-                recommender.sp,
-                playlist_id,
-                feature_df,
-                id_index,
-                name_index,
-            )
-            recommender.build_model_from_enriched(enriched_tracks)
-        else:
-            print("[Main] No playlist selected; using fallback recommendations only.")
+    playlist_id = choose_playlist(recommender)
+    if playlist_id and feature_df is not None:
+        enriched_tracks = build_enriched_tracks_from_playlist(
+            recommender.sp,
+            playlist_id,
+            feature_df,
+            id_index,
+            name_index,
+        )
+        recommender.build_model_from_enriched(enriched_tracks)
+    elif playlist_id and feature_df is None:
+        print("[Main] Playlist selected but feature dataset not available; using fallback recommendations only.")
     else:
-        print("[Main] No feature dataset; using fallback recommendations only.")
+        print("[Main] No playlist selected; using fallback recommendations only.")
 
     # ---- open webcam ----
     cap = cv2.VideoCapture(1, cv2.CAP_AVFOUNDATION)  # Mac
@@ -113,12 +110,11 @@ def main():
 
     cv2.setMouseCallback(window_name, handle_mouse)
 
-    # ---- emotion / stability state ----
     last_scene_emotion = "..."
     stable_emotion = "..."
     candidate_emotion = None
     stable_since = None
-    STABLE_SECONDS = 0.65    # stable emotion for {STABLE_SECONDS} sec
+    STABLE_SECONDS = 0.65  # stable emotion for {STABLE_SECONDS} sec
 
     '''
     Microexpressions: 
@@ -127,11 +123,9 @@ def main():
     They typically last between 0.04 and 0.5 seconds (40 to 500 milliseconds).
     '''
 
-    # ---- recommendation state ----
     last_reco_emotion = None
     current_tracks = []
 
-    # ---- Spotify playback state ----
     playback_check_interval = 1.0
     last_playback_check = 0.0
     current_track_id = None
@@ -218,7 +212,6 @@ def main():
                 current_track_id = None
                 seconds_to_end = None
 
-
         overlay_state = draw_overlay(
             frame=frame,
             agg_emotion=agg_emotion,
@@ -226,17 +219,13 @@ def main():
             current_tracks=current_tracks,
         )
         button_rect[0] = overlay_state.get("quit_button")
-        
+
         cv2.imshow(window_name, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
         if quit_clicked[0]:
             break
-
-        # recommendation logic:
-        #   - if stable emotion changed -> recommend immediately
-        #   - if same emotion -> recommend when song is within 20s of ending
 
         def do_recommend_and_queue(reason: str):
             nonlocal current_tracks, last_reco_emotion, last_queued_for_track_id
@@ -281,10 +270,10 @@ def main():
 
         # CASE 2: emotion unchanged -> recommend when song is about to end (<= 20s)
         if (
-            current_track_id is not None
-            and seconds_to_end is not None
-            and seconds_to_end <= 20.0
-            and current_track_id != last_queued_for_track_id
+                current_track_id is not None
+                and seconds_to_end is not None
+                and seconds_to_end <= 20.0
+                and current_track_id != last_queued_for_track_id
         ):
             do_recommend_and_queue("song ending soon")
 
