@@ -72,13 +72,13 @@ class EmotionDetector:
 
         # Normalize to your EmotionRecommender emotion keys
         RAW_TO_PIPE = {
-            "angry": "anger",
+            "angry": "angry",
             "contempt": "contempt",
             "disgust": "disgust",
             "fear": "fear",
-            "happy": "happiness",
+            "happy": "happy",
             "neutral": "neutral",
-            "sad": "sadness",
+            "sad": "sad",
             "suprise": "surprise",  # fix typo
             "surprise": "surprise",
         }
