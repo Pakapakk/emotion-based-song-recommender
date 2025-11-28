@@ -13,13 +13,13 @@ from ultralytics import YOLO
 # }
 
 EMOTION_DICT = {
-    0: "anger",
+    0: "angry",
     1: "contempt",
     2: "disgust",
     3: "fear",
-    4: "happiness",
+    4: "happy",
     5: "neutral",
-    6: "sadness",
+    6: "sad",
     7: "surprise",
 }
 
@@ -36,7 +36,7 @@ class EmotionDetector:
     def __init__(
         self,
         det_weights: str = "../models/model_face_detection.pt",
-        emotion_pt: str = "../models/model_emotion.pt",
+        emotion_pt: str = "../models/model_emotion_classifier.pt",
         classify_every: int = 3,
         conf: float = 0.5,
     ) -> None:

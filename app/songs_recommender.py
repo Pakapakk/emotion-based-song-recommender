@@ -19,9 +19,9 @@ load_dotenv()
 # ------------------- config -------------------
 
 EMO_MAP: Dict[str, Dict] = {
-    "happiness": {"target_valence": 0.9, "target_energy": 0.8, "target_tempo": 125},
-    "sadness":   {"target_valence": 0.2, "target_energy": 0.2, "target_tempo": 70},
-    "anger":     {"target_valence": 0.2, "target_energy": 0.9, "target_tempo": 140},
+    "happy":     {"target_valence": 0.9, "target_energy": 0.8, "target_tempo": 125},
+    "sad":       {"target_valence": 0.2, "target_energy": 0.2, "target_tempo": 70},
+    "angry":     {"target_valence": 0.2, "target_energy": 0.9, "target_tempo": 140},
     "surprise":  {"target_valence": 0.6, "target_energy": 0.6, "target_tempo": 115},
     "neutral":   {"target_valence": 0.5, "target_energy": 0.4, "target_tempo": 100},
     "disgust":   {"target_valence": 0.1, "target_energy": 0.7, "target_tempo": 130},
@@ -43,6 +43,9 @@ FEATURE_KEYS = [
     "tempo",
     "duration_ms",
 ]
+
+# How “jittery” you want similarity to be; try 0.03–0.1
+SIMILARITY_NOISE_SCALE = 0.05
 
 
 def _get_spotify_client() -> spotipy.Spotify:
@@ -106,6 +109,8 @@ class EmotionRecommender:
 
         self.recent_track_ids: deque[str] = deque(maxlen=50)
 
+    # ---------- model building ----------
+
     def build_model_from_enriched(self, enriched_tracks: List[Dict]) -> None:
         """
         Take a list of tracks, each with a 'features' dict for FEATURE_KEYS,
@@ -141,6 +146,8 @@ class EmotionRecommender:
                 "but not enough for clustering. Using similarity-only personalization."
             )
 
+    # ---------- public API ----------
+
     def get_recommendations(
         self,
         emotion: str,
@@ -156,8 +163,11 @@ class EmotionRecommender:
         emo = emotion if emotion in EMO_MAP else "neutral"
 
         base_k = max(k, 3)
-        personal_top_k = base_k * 3
-        fallback_top_k = base_k * 3
+
+        # We treat these as *pool sizes*, not final output sizes
+        pool_factor = 5  # bigger → more variety
+        personal_top_k = base_k * pool_factor
+        fallback_top_k = base_k * pool_factor
 
         personal_tracks: List[Dict] = []
         if use_personal and self.X is not None and self.tracks is not None:
@@ -202,6 +212,8 @@ class EmotionRecommender:
 
         return picks
 
+    # ---------- feature matrix / targets / scoring ----------
+
     def _build_feature_matrix(
         self, tracks: List[Dict]
     ) -> Tuple[np.ndarray, StandardScaler, List[int]]:
@@ -242,7 +254,6 @@ class EmotionRecommender:
         liveness = 0.2 + 0.3 * energy
 
         loudness = -20.0 + 20.0 * energy
-
         duration_ms = (3.5 - 1.0 * (energy - 0.5)) * 60_000
 
         base = {
@@ -289,6 +300,11 @@ class EmotionRecommender:
         return cluster_to_emotion
 
     def _personalized_recs(self, emotion: str, top_k: int) -> List[Dict]:
+        """
+        top_k here is treated as the size of the *candidate pool* (top-N by similarity),
+        then we randomize inside that pool. Adds a bit of noise to similarity so that
+        repeated runs don't always pick exactly the same tracks.
+        """
         if self.X is None or not self.tracks or self.scaler is None:
             return []
 
@@ -308,13 +324,24 @@ class EmotionRecommender:
                 if cand:
                     candidates = cand
 
+        if not candidates:
+            return []
+
         Xc = self.X[candidates]
         sims = cosine_similarity(Xc, v_scaled).reshape(-1)
-        order = np.argsort(-sims)
+
+        noise = np.random.normal(loc=0.0, scale=SIMILARITY_NOISE_SCALE, size=sims.shape)
+        sims_noisy = sims + noise
+
+        order = np.argsort(-sims_noisy)
+
+        pool_size = min(top_k, len(order))
+        pool_indices = [candidates[int(i)] for i in order[:pool_size]]
+
+        random.shuffle(pool_indices)
 
         picks: List[Dict] = []
-        for idx in order[:top_k]:
-            ti = candidates[int(idx)]
+        for ti in pool_indices:
             t = self.tracks[ti]
             picks.append(
                 {
@@ -325,13 +352,14 @@ class EmotionRecommender:
                     "url": t.get("external_urls", {}).get("spotify", ""),
                 }
             )
+
         return picks
 
     def _fallback_spotify_recs(self, emotion: str, top_k: int) -> List[Dict]:
         query_map = {
-            "happiness": "happy upbeat pop",
-            "sadness": "sad acoustic ballad",
-            "anger": "aggressive rock rap",
+            "happy": "happy upbeat pop",
+            "sad": "sad acoustic ballad",
+            "angry": "aggressive rock rap",
             "surprise": "surprising experimental indie electronic",
             "neutral": "lofi chill beats",
             "disgust": "industrial metal",
@@ -342,9 +370,10 @@ class EmotionRecommender:
 
         tracks: List[Dict] = []
         try:
-            # ask Spotify for more than we need for variety
             limit = max(top_k, 10)
-            results = self.sp.search(q=q, type="track", limit=limit)
+            offset = random.randint(0, 40)
+            results = self.sp.search(q=q, type="track", limit=limit, offset=offset)
+
             for t in results.get("tracks", {}).get("items", []):
                 tracks.append(
                     {
@@ -358,6 +387,7 @@ class EmotionRecommender:
         except Exception as e:
             print("[Spotify fallback search error]", e)
 
+        random.shuffle(tracks)
         return tracks
 
     def queue_tracks(self, tracks: List[Dict]) -> int:

@@ -55,7 +55,7 @@ def main():
     # ---- init modules ----
     detector = EmotionDetector(
         det_weights="models/model_face_detection.pt",
-        emotion_pt="models/model_emotion.pt",
+        emotion_pt="models/model_emotion_classifier.pt",
         classify_every=3,
         conf=0.5,
     )
@@ -114,7 +114,7 @@ def main():
     stable_emotion = "..."
     candidate_emotion = None
     stable_since = None
-    STABLE_SECONDS = 0.65  # stable emotion for {STABLE_SECONDS} sec
+    STABLE_SECONDS = 0.5  # stable emotion for {STABLE_SECONDS} sec
 
     '''
     Microexpressions: 
@@ -134,9 +134,9 @@ def main():
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            print("Error: Frame not received")
-            break
+        # if not ret:
+        #     print("Error: Frame not received")
+        #     break
 
         frame = cv2.flip(frame, 1)
 
