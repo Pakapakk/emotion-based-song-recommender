@@ -22,7 +22,7 @@ SPOTIPY_REDIRECT_URI="http://127.0.0.1:8888/callback"
 
 ### First Run
 ```commandline
-python3 main.py
+python3 app/main.py
 ```
 - You will see the `URI`, open it
 - Click `agree/accept` the terms
