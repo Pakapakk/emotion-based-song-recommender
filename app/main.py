@@ -12,7 +12,7 @@ def choose_playlist(rec: EmotionRecommender):
     """
     - list user's playlists
     - let them pick one
-    - RETURN playlist_id (we'll build the model separately)
+    - RETURN playlist_id (build the model separately)
     """
     try:
         playlists = rec.sp.current_user_playlists(limit=20)

@@ -44,7 +44,6 @@ FEATURE_KEYS = [
     "duration_ms",
 ]
 
-# How “jittery” you want similarity to be; try 0.03–0.1
 SIMILARITY_NOISE_SCALE = 0.05
 
 

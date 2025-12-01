@@ -25,7 +25,7 @@ def _normalize_text(s: str) -> str:
 
 def load_feature_dataset(csv_path: str):
     """
-    Load your CSV dataset and build lookup dicts.
+    Load CSV dataset and build lookup dicts.
 
     Expected CSV schema (at minimum):
         track_id, artists, album_name, track_name, popularity, duration_ms,

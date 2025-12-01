@@ -27,7 +27,6 @@ EMOTION_DICT = {
 class EmotionDetector:
     """
     Emotion-detection module (multi-face version).
-    - You give it a frame (BGR).
     - It returns a list of (emotion_label, box) per face.
 
     box = (x1, y1, x2, y2)
