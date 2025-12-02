@@ -27,21 +27,27 @@ EMOTION_DICT = {
 class EmotionDetector:
     """
     Emotion-detection module (multi-face version).
-    - It returns a list of (emotion_label, box) per face.
+    - It returns a list of (emotion_label, box, confidence) per face.
 
-    box = (x1, y1, x2, y2)
+      box = (x1, y1, x2, y2)
+      confidence = float in [0.0, 1.0]
     """
 
     def __init__(
         self,
-        det_weights: str = "../models/model_face_detection.pt",
-        emotion_pt: str = "../models/model_emotion_classifier.pt",
+        det_weights: str = "models/model_face_detection.pt",
+        emotion_pt: str = "models/model_emotion_classifier.pt",
         classify_every: int = 3,
         conf: float = 0.5,
     ) -> None:
+
         self.det_model = YOLO(det_weights)
+
         self.emotion_model = YOLO(emotion_pt)
-        self.class_names = {i: name.lower() for i, name in self.emotion_model.names.items()}
+
+        self.class_names = {
+            i: name.lower() for i, name in self.emotion_model.names.items()
+        }
         print("Loaded emotion classes:", self.class_names)
 
         self.classify_every = max(1, int(classify_every))
@@ -50,26 +56,46 @@ class EmotionDetector:
         self.frame_count = 0
         self.last_emotions = []
 
-    def _classify_face(self, face_bgr: np.ndarray) -> str:
-        if face_bgr.ndim == 2:
-            face_bgr = cv2.cvtColor(face_bgr, cv2.COLOR_GRAY2BGR)
-        elif face_bgr.shape[2] == 1:
-            face_bgr = cv2.cvtColor(face_bgr, cv2.COLOR_GRAY2BGR)
+        self._last_debug_emotion = None
+        self._last_debug_window = None
 
-        results = self.emotion_model(face_bgr, imgsz=640, verbose=False)
+    def _classify_face(self, face_bgr: np.ndarray):
+        """
+        Classify a cropped face region.
+
+        - Converts to grayscale but keeps original H x W
+        - Converts back to 3-channel so YOLO can consume it
+        - Shows the cropped grayscale face in a window
+        - Returns (emotion_label, confidence)
+        """
+        if face_bgr is None or face_bgr.size == 0:
+            return "unknown", 0.0
+
+        if face_bgr.ndim == 2:
+            gray = face_bgr
+        elif face_bgr.ndim == 3 and face_bgr.shape[2] == 1:
+            gray = face_bgr[..., 0]
+        else:
+            # Normal case: BGR -> gray
+            gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+
+        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        results = self.emotion_model(gray_bgr, imgsz=640, verbose=False)
         if not results:
-            return "unknown"
+            return "unknown", 0.0
 
         r = results[0]
         if r.probs is None:
-            return "unknown"
+            return "unknown", 0.0
 
         pred_idx = int(r.probs.top1)
+        # correct YOLO top-1 confidence
+        confidence = float(r.probs.top1conf)
 
-        # YOLO’s built-in class names
+        # YOLO’s built-in class name
         raw_name = self.class_names.get(pred_idx, "unknown")
 
-        # Normalize to your EmotionRecommender emotion keys
         RAW_TO_PIPE = {
             "angry": "angry",
             "contempt": "contempt",
@@ -82,13 +108,30 @@ class EmotionDetector:
             "surprise": "surprise",
         }
 
-        return RAW_TO_PIPE.get(raw_name, "unknown")
+        mapped = RAW_TO_PIPE.get(raw_name, "unknown")
+
+        # ---------- cropped grayscale face ----------
+        # if mapped not in ("unknown", "..."):
+        #     window_name = f"Face – {mapped}"
+        #
+        #     if self._last_debug_window is not None and window_name != self._last_debug_window:
+        #         try:
+        #             cv2.destroyWindow(self._last_debug_window)
+        #         except cv2.error:
+        #             pass
+        #
+        #     cv2.imshow(window_name, gray)
+        #
+        #     self._last_debug_emotion = mapped
+        #     self._last_debug_window = window_name
+
+        return mapped, confidence
 
     def process_frame_multi(self, frame_bgr: np.ndarray):
         """
         Multi-face API.
         :param frame_bgr: input frame (BGR).
-        :return: list of (emotion_text, box)
+        :return: list of (emotion_text, box, confidence)
                  box = (x1, y1, x2, y2)
         """
         self.frame_count += 1
@@ -119,20 +162,22 @@ class EmotionDetector:
                 faces.append((face_crop, (x1, y1, x2, y2)))
                 face_boxes.append((x1, y1, x2, y2))
 
-        # ---- Classify every N frames to save FPS ----
         emotions = []
+
+        # ---- Classify every N frames to save FPS ----
         if faces and (self.frame_count % self.classify_every == 0):
             for face_crop, box in faces:
-                emo = self._classify_face(face_crop)
-                emotions.append((emo, box))
+                emo, conf = self._classify_face(face_crop)
+                emotions.append((emo, box, conf))
             self.last_emotions = emotions
         else:
             if self.last_emotions and len(self.last_emotions) == len(face_boxes):
                 emotions = [
-                    (emo, box) for (emo, _old_box), box in zip(self.last_emotions, face_boxes)
+                    (emo, new_box, conf)
+                    for (emo, _old_box, conf), new_box in zip(self.last_emotions, face_boxes)
                 ]
             else:
-                emotions = [("...", box) for box in face_boxes]
+                emotions = [("...", box, 0.0) for box in face_boxes]
                 self.last_emotions = emotions
 
         return emotions

@@ -199,13 +199,19 @@ def get_emotion_color(emotion):
 
 
 def draw_face_box(img, x1, y1, x2, y2, emotion, confidence=1.0):
-    """Draw modern face detection box with emotion label."""
+    """Draw modern face detection box with emotion label + confidence."""
     box_color = get_emotion_color(emotion)
 
+    # Bounding box (outer + inner)
     cv2.rectangle(img, (x1, y1), (x2, y2), box_color, 3)
     cv2.rectangle(img, (x1 + 2, y1 + 2), (x2 - 2, y2 - 2), box_color, 1)
 
-    label = emotion.upper() if emotion not in ("...", "unknown", None) else "DETECTING..."
+    if emotion not in ("...", "unknown", None):
+        label = f"{emotion.upper()} ({confidence:.2f})"
+    else:
+        label = "DETECTING..."
+
+    # Label font settings
     label_font_scale = 0.7
     label_thickness = 2
     (label_width, label_height), baseline = cv2.getTextSize(
@@ -217,12 +223,22 @@ def draw_face_box(img, x1, y1, x2, y2, emotion, confidence=1.0):
     label_y1 = max(0, y1 - label_bg_height)
     label_x2 = min(img.shape[1], x1 + label_bg_width)
 
+    # Draw rounded background
     draw_rounded_rect(
-        img, (x1, label_y1), (label_x2, y1), COLORS["bg_panel"], thickness=-1, radius=6, alpha=0.98
+        img,
+        (x1, label_y1),
+        (label_x2, y1),
+        COLORS["bg_panel"],
+        thickness=-1,
+        radius=6,
+        alpha=0.98,
     )
 
+    # Label position
     label_x = x1 + 8
     label_y = y1 - 8
+
+    # Draw label twice for outline effect
     cv2.putText(
         img,
         label,
@@ -243,6 +259,7 @@ def draw_face_box(img, x1, y1, x2, y2, emotion, confidence=1.0):
         label_thickness,
         cv2.LINE_AA,
     )
+
 
 
 def draw_quit_button(img, pos, width=150, height=55, text="Quit"):

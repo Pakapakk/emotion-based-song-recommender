@@ -117,8 +117,8 @@ def main():
     STABLE_SECONDS = 0.5  # stable emotion for {STABLE_SECONDS} sec
 
     '''
-    Microexpressions: 
-    These are involuntary, very brief facial muscle movements that 
+    Microexpressions:
+    These are involuntary, very brief facial muscle movements that
     reveal a person's true emotion, often when they are trying to conceal it.
     They typically last between 0.04 and 0.5 seconds (40 to 500 milliseconds).
     '''
@@ -140,15 +140,21 @@ def main():
 
         frame = cv2.flip(frame, 1)
 
-        # detect multiple faces + emotions
+        # detect multiple faces + emotions (+ confidence)
         emo_boxes = detector.process_frame_multi(frame)
+        # emo_boxes: [(emo, box, conf), ...]
 
         valid_face_emotions = []
-        for emo, box in emo_boxes:
+        for emo, box, conf in emo_boxes:
             if box is None:
                 continue
             x1, y1, x2, y2 = box
-            draw_face_box(frame, x1, y1, x2, y2, emo)
+
+            draw_face_box(frame, x1, y1, x2, y2, emo, conf)
+
+            # Optional: confidence threshold filtering
+            # if conf < 0.3:
+            #     continue
 
             if emo not in ("...", "unknown", None):
                 valid_face_emotions.append(emo)
@@ -179,7 +185,6 @@ def main():
             if agg_emotion != candidate_emotion:
                 candidate_emotion = agg_emotion
                 stable_since = t_now
-                # Reset stable emotion when candidate changes
                 stable_emotion = "..."
             else:
                 if stable_since is not None and (t_now - stable_since) >= STABLE_SECONDS:
@@ -187,7 +192,6 @@ def main():
         else:
             candidate_emotion = None
             stable_since = None
-            # Reset stable emotion when no valid emotion detected
             stable_emotion = "..."
 
         # poll Spotify playback every 1s
@@ -270,10 +274,10 @@ def main():
 
         # CASE 2: emotion unchanged -> recommend when song is about to end (<= 20s)
         if (
-                current_track_id is not None
-                and seconds_to_end is not None
-                and seconds_to_end <= 20.0
-                and current_track_id != last_queued_for_track_id
+            current_track_id is not None
+            and seconds_to_end is not None
+            and seconds_to_end <= 20.0
+            and current_track_id != last_queued_for_track_id
         ):
             do_recommend_and_queue("song ending soon")
 
